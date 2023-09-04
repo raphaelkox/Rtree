@@ -31,7 +31,9 @@ public struct MinMaxData {
 
 public class Rtree : MonoBehaviour
 {
-    private const int M = 5;
+    [SerializeField] private BoxCollider2D queryArea;
+
+    private const int M = 50;
     private const int WORLD_SIZE = 100;
 
     public Node root;
@@ -72,17 +74,18 @@ public class Rtree : MonoBehaviour
 
         steps = new List<Action>() {
              Noop,
-             Simulate,
+             //Simulate,
+             SimulateInteractive,
              /*Step0,            
              Noop,
              Step1,
              Noop,
              Step2,
              Noop,
-             Step3,*/
+             Step3,
              Noop,
              Step4,
-             Noop,
+             Noop,*/
          };
     }
 
@@ -94,8 +97,6 @@ public class Rtree : MonoBehaviour
         step++;
         if (step >= steps.Count) {
             step = steps.Count - 1;
-        } else {
-            Debug.Log($"Next step! {step}");
         }
     }
 
@@ -126,106 +127,111 @@ public class Rtree : MonoBehaviour
                 parent.nodes.Remove(minMaxData.minRef);
                 parent.nodes.Remove(minMaxData.maxRef);
 
-                //for the second iteration, we're going to check
-                //for area increase and overlap
-                var minMaxX = GetMinMaxX(parent);
-                var minMaxY = GetMinMaxY(parent);
+                int safety = 0;
+                while (parent.nodes.Count > 1 && safety < 1000) {
+                    safety++;
+                    //for the next iteration, we're going to check
+                    //for area increase and overlap
+                    var minMaxX = GetMinMaxX(parent);
+                    var minMaxY = GetMinMaxY(parent);
 
-                //X Case
-                Rect leafAXCase = Expand(leafA.bounds, minMaxX.minRef.bounds);
-                Rect leafBXCase = Expand(leafB.bounds, minMaxX.maxRef.bounds);
-                float totalXCaseArea = (leafAXCase.width * leafAXCase.height) + (leafBXCase.width * leafBXCase.height);
-                //Debug.Log($"XCase area: {totalXCaseArea}");
+                    //X Case
+                    Rect leafAXCase = Expand(leafA.bounds, minMaxX.minRef.bounds);
+                    Rect leafBXCase = Expand(leafB.bounds, minMaxX.maxRef.bounds);
+                    float totalXCaseArea = (leafAXCase.width * leafAXCase.height) + (leafBXCase.width * leafBXCase.height);
+                    //Debug.Log($"XCase area: {totalXCaseArea}");
 
-                //Y Case
-                Rect leafAYCase = Expand(leafA.bounds, minMaxY.minRef.bounds);
-                Rect leafBYCase = Expand(leafB.bounds, minMaxY.maxRef.bounds);
-                float totalYCaseArea = (leafAYCase.width * leafAYCase.height) + (leafBYCase.width * leafBYCase.height);
-                //Debug.Log($"YCase area: {totalYCaseArea}");
+                    //Y Case
+                    Rect leafAYCase = Expand(leafA.bounds, minMaxY.minRef.bounds);
+                    Rect leafBYCase = Expand(leafB.bounds, minMaxY.maxRef.bounds);
+                    float totalYCaseArea = (leafAYCase.width * leafAYCase.height) + (leafBYCase.width * leafBYCase.height);
+                    //Debug.Log($"YCase area: {totalYCaseArea}");
 
-                //compare cases by area
-                int xScore = 0;
-                int yScore = 0;
-                if(totalXCaseArea < totalYCaseArea) {
-                    xScore++;
-                    //Debug.Log($"XCase Selected for area!");
+                    //compare cases by area
+                    int xScore = 0;
+                    int yScore = 0;
+                    if (totalXCaseArea < totalYCaseArea) {
+                        xScore++;
+                        //Debug.Log($"XCase Selected for area!");
+                    } else if (totalXCaseArea > totalYCaseArea) {
+                        yScore++;
+                        //Debug.Log($"YCase Selected for area!");
+                    } else {
+                        //Debug.Log($"Area draw!");
+                    }
+
+                    // check overlaps
+                    if (!leafAXCase.Overlaps(leafBXCase)) {
+                        xScore++;
+                        //Debug.Log($"XCase no overlap!");
+                    }
+
+                    if (!leafAYCase.Overlaps(leafBYCase)) {
+                        yScore++;
+                        //Debug.Log($"YCase no overlap!");
+                    }
+
+                    bool xPriority = true;
+                    bool xSelected = xPriority;
+                    //Debug.Log($"XScore: {xScore}");
+                    //Debug.Log($"YScore: {yScore}");
+                    //take final decision
+                    if (xScore > yScore) {
+                        //Debug.Log($"XCase selected!");
+                        xSelected = true;
+                    } else if (yScore > xScore) {
+                        //Debug.Log($"YCase selected!");
+                        xSelected = false;
+                    } else {
+                        //Debug.Log($"Draw! (selected by priority flag)");
+                    }
+
+                    Node minRef = xSelected ? minMaxX.minRef : minMaxY.minRef;
+                    Node maxRef = xSelected ? minMaxX.maxRef : minMaxY.maxRef;
+                    Rect leafABounds = xSelected ? leafAXCase : leafAYCase;
+                    Rect leafBBounds = xSelected ? leafBXCase : leafBYCase;
+
+                    //add closest ones to respective leafs
+                    leafA.nodes.Add(minRef);
+                    //expand leaf to encompass 
+                    leafA.bounds = leafABounds;
+
+                    //do same to other node
+                    leafB.nodes.Add(maxRef);
+                    //expand leaf to encompass 
+                    leafB.bounds = leafBBounds;
+
+                    //remove nodes from parent
+                    parent.nodes.Remove(minRef);
+                    parent.nodes.Remove(maxRef);
                 }
-                else if (totalXCaseArea > totalYCaseArea ) {
-                    yScore++;
-                    //Debug.Log($"YCase Selected for area!");
-                } else {
-                    //Debug.Log($"Area draw!");
-                }
 
-                // check overlaps
-                if (!leafAXCase.Overlaps(leafBXCase)) {
-                    xScore++;
-                    //Debug.Log($"XCase no overlap!");
-                }
-
-                if (!leafAYCase.Overlaps(leafBYCase)) {
-                    yScore++;
-                    //Debug.Log($"YCase no overlap!");
-                }
-
-                bool xPriority = true;
-                bool xSelected = xPriority;
-                //Debug.Log($"XScore: {xScore}");
-                //Debug.Log($"YScore: {yScore}");
-                //take final decision
-                if (xScore > yScore) {
-                    //Debug.Log($"XCase selected!");
-                    xSelected = true;
-                } else if (yScore > xScore) {
-                    //Debug.Log($"YCase selected!");
-                    xSelected = false;
-                } else {
-                    //Debug.Log($"Draw! (selected by priority flag)");
-                }
-
-                Node minRef = xSelected ? minMaxX.minRef : minMaxY.minRef;
-                Node maxRef = xSelected ? minMaxX.maxRef : minMaxY.maxRef;
-                Rect leafABounds = xSelected ? leafAXCase : leafAYCase;
-                Rect leafBBounds = xSelected ? leafBXCase : leafBYCase;
-
-                //add closest ones to respective leafs
-                leafA.nodes.Add(minRef);
-                //expand leaf to encompass 
-                leafA.bounds = leafABounds;
-
-                //do same to other node
-                leafB.nodes.Add(maxRef);
-                //expand leaf to encompass 
-                leafB.bounds = leafBBounds;
-
-                //remove nodes from parent
-                parent.nodes.Remove(minRef);
-                parent.nodes.Remove(maxRef);
-
-                //for last node, check if any leaf already encompass it
-                if (leafA.bounds.Overlaps(parent.nodes[0].bounds)) {
-                    leafA.nodes.Add(parent.nodes[0]);
-                    leafA.bounds = Expand(leafA.bounds, parent.nodes[0].bounds);
-                    //remove from parent
-                    parent.nodes.Clear();
-                } else if (leafB.bounds.Overlaps(parent.nodes[0].bounds)) {
-                    leafB.nodes.Add(parent.nodes[0]);
-                    leafB.bounds = Expand(leafB.bounds, parent.nodes[0].bounds);
-                    //remove from parent
-                    parent.nodes.Clear();
-                } else {
-                    //no leafs overlap, get closest by distance
-                    var center = parent.nodes[0].bounds.center;
-                    if (Vector2.Distance(leafA.bounds.center, center) < Vector2.Distance(leafB.bounds.center, center)) {
+                if (parent.nodes.Count > 0) {
+                    //for last node, check if any leaf already encompass it
+                    if (leafA.bounds.Overlaps(parent.nodes[0].bounds)) {
                         leafA.nodes.Add(parent.nodes[0]);
                         leafA.bounds = Expand(leafA.bounds, parent.nodes[0].bounds);
                         //remove from parent
                         parent.nodes.Clear();
-                    } else {
+                    } else if (leafB.bounds.Overlaps(parent.nodes[0].bounds)) {
                         leafB.nodes.Add(parent.nodes[0]);
                         leafB.bounds = Expand(leafB.bounds, parent.nodes[0].bounds);
                         //remove from parent
                         parent.nodes.Clear();
+                    } else {
+                        //no leafs overlap, get closest by distance
+                        var center = parent.nodes[0].bounds.center;
+                        if (Vector2.Distance(leafA.bounds.center, center) < Vector2.Distance(leafB.bounds.center, center)) {
+                            leafA.nodes.Add(parent.nodes[0]);
+                            leafA.bounds = Expand(leafA.bounds, parent.nodes[0].bounds);
+                            //remove from parent
+                            parent.nodes.Clear();
+                        } else {
+                            leafB.nodes.Add(parent.nodes[0]);
+                            leafB.bounds = Expand(leafB.bounds, parent.nodes[0].bounds);
+                            //remove from parent
+                            parent.nodes.Clear();
+                        }
                     }
                 }
                 parent.leaves.Add(leafA);
@@ -412,18 +418,54 @@ public class Rtree : MonoBehaviour
     }
 
     private void SimulateInteractive() {
+        int iterations = 10;
 
-        var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
-        var y = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
-        var w = Random.Range(0.25f, 1f);
-        Node newObj = new("", new Vector2(x, y), new Vector2(w, w));
-        AddNode(root, newObj);
+        for (int i = 0; i < iterations; i++) {
+            var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
+            var y = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
+            var w = Random.Range(0.25f, 1f);
+            Node newObj = new("", new Vector2(x, y), new Vector2(w, w));
+            AddNode(root, newObj);
+        }
 
         step = 0;
     }
 
+    private void QueryInteractive() {
+        var region = new Rect(queryArea.bounds.min.x, queryArea.bounds.min.y, queryArea.bounds.size.x, queryArea.bounds.size.y);
+        List<Node> result = new();
+
+        //test linear
+        Stopwatch sw = Stopwatch.StartNew();
+        sw.Stop();
+        sw.Reset();
+        /*sw.Start();
+        foreach (var node in allNodes) {
+            if (node.bounds.Overlaps(region)) result.Add(node);
+            checks++;
+        }
+        var linearTime = sw.Elapsed;
+        sw.Stop();
+        sw.Reset();
+
+        Debug.Log($"Linear: {linearTime.Milliseconds}ms");
+        Debug.Log($"Checks: {checks}");
+        Debug.Log("---");*/
+
+        queryChecks = 0;
+        sw.Start();
+        //query region
+        result = QueryRegion(root, region);
+        var rtreeTime = sw.Elapsed;
+        sw.Stop();
+        sw.Reset();
+
+        Debug.Log($"R-tree: {rtreeTime.Milliseconds}ms");
+        Debug.Log($"Checks: {queryChecks}");
+    }
+
     private void Simulate() {
-        int iterations = 100000;
+        int iterations = 10000;
 
         for (int i = 0; i < iterations; i++) {
             var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
@@ -438,8 +480,12 @@ public class Rtree : MonoBehaviour
     }
 
     private void Noop() {
-        if (Input.GetKeyDown(KeyCode.Space)) {
+        if (Input.GetKeyDown(KeyCode.Space) || Input.GetMouseButtonDown(0)) {
             NextStep();
+        }
+
+        if (Input.GetMouseButtonDown(1)) {
+            QueryInteractive();
         }
     }
 
@@ -489,7 +535,7 @@ public class Rtree : MonoBehaviour
         Stopwatch sw = Stopwatch.StartNew();
         sw.Stop();
         sw.Reset();
-        sw.Start();
+        /*sw.Start();
         foreach (var node in allNodes) {
             if (node.bounds.Overlaps(region)) result.Add(node);
             checks++;
@@ -500,7 +546,7 @@ public class Rtree : MonoBehaviour
 
         Debug.Log($"Linear: {linearTime.Milliseconds}ms");
         Debug.Log($"Checks: {checks}");
-        Debug.Log("---");
+        Debug.Log("---");*/
 
         queryChecks = 0;
         sw.Start();
