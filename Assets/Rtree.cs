@@ -1,18 +1,22 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using Unity.VisualScripting;
+using System.Diagnostics;
 using UnityEditor.Experimental.GraphView;
 using UnityEngine;
 using Random = UnityEngine.Random;
+using Debug = UnityEngine.Debug;
 
 public class Node {
-    public Node(Rect bounds) {
+    public string id;
+    public Node(string id, Rect bounds) {
         this.bounds = bounds;
+        this.id = id;
     }
 
-    public Node(Vector2 center, Vector2 size) {
+    public Node(string id, Vector2 center, Vector2 size) {
         bounds = new Rect(center, size);
+        this.id = id;
     }
 
     public Rect bounds;
@@ -28,7 +32,7 @@ public struct MinMaxData {
 public class Rtree : MonoBehaviour
 {
     private const int M = 5;
-    private const int WORLD_SIZE = 30;
+    private const int WORLD_SIZE = 100;
 
     public Node root;
     public int step = 0;
@@ -64,18 +68,20 @@ public class Rtree : MonoBehaviour
     }
 
     private void Awake() {
-        root = new Node(new Vector2(-WORLD_SIZE / 2f, -WORLD_SIZE / 2f), new Vector2(WORLD_SIZE, WORLD_SIZE));
+        root = new Node("root", new Vector2(-WORLD_SIZE / 2f, -WORLD_SIZE / 2f), new Vector2(WORLD_SIZE, WORLD_SIZE));
 
         steps = new List<Action>() {
              Noop,
-             //Simulate,
-             Step0,            
+             Simulate,
+             /*Step0,            
              Noop,
              Step1,
              Noop,
              Step2,
              Noop,
-             Step3,
+             Step3,*/
+             Noop,
+             Step4,
              Noop,
          };
     }
@@ -93,7 +99,9 @@ public class Rtree : MonoBehaviour
         }
     }
 
-    public void AddNode(Node parent, Node node) {
+    private List<Node> allNodes = new List<Node>();
+
+    public void AddNode(Node parent, Node node) {        
         //check if parent is leaf
         if(parent.leaves.Count == 0) {
             // parent is leaf, try to add node
@@ -108,10 +116,10 @@ public class Rtree : MonoBehaviour
                 var minMaxData = GetMinMax(ref parent);
 
                 //create 2 leafs, to add furthest nodes apart
-                Node leafA = new(minMaxData.minRef.bounds);
+                Node leafA = new($"{parent.id}_leafA", minMaxData.minRef.bounds);
                 leafA.nodes.Add(minMaxData.minRef);
 
-                Node leafB = new(minMaxData.maxRef.bounds);
+                Node leafB = new($"{parent.id}_leafB", minMaxData.maxRef.bounds);
                 leafB.nodes.Add(minMaxData.maxRef);
 
                 //remove nodes from parent
@@ -262,6 +270,30 @@ public class Rtree : MonoBehaviour
         }
     }
 
+    private int queryChecks = 0;
+    public List<Node> QueryRegion(Node current, Rect region) {
+        List<Node> result = new();
+
+        if(current.leaves.Count > 0) {
+            //not leaf node
+            foreach (var leaf in current.leaves) {
+                queryChecks++;
+                if (leaf.bounds.Overlaps(region)) {
+                    result.AddRange(QueryRegion(leaf, region));
+                }
+            }
+        }
+
+        foreach (var child in current.nodes) {
+            queryChecks++;
+            if (child.bounds.Overlaps(region)) {
+                result.Add(child);
+            }
+        }
+
+        return result;
+    }
+
     public MinMaxData GetMinMaxX(Node parent) {
         MinMaxData minMaxData = new();
         //set def values
@@ -379,18 +411,30 @@ public class Rtree : MonoBehaviour
         return leafBounds;
     }
 
-    private void Simulate() {
-        //int iterations = 100;
+    private void SimulateInteractive() {
 
-        //for (int i = 0; i < iterations; i++) {
+        var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
+        var y = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
+        var w = Random.Range(0.25f, 1f);
+        Node newObj = new("", new Vector2(x, y), new Vector2(w, w));
+        AddNode(root, newObj);
+
+        step = 0;
+    }
+
+    private void Simulate() {
+        int iterations = 100000;
+
+        for (int i = 0; i < iterations; i++) {
             var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
             var y = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
             var w = Random.Range(0.25f, 1f);
-            Node newObj = new(new Vector2(x, y), new Vector2(w, w));
+            Node newObj = new("", new Vector2(x, y), new Vector2(w, w));
             AddNode(root, newObj);
-        //}
+            allNodes.Add(newObj);
+        }
 
-        step = 0;
+        NextStep();
     }
 
     private void Noop() {
@@ -401,38 +445,74 @@ public class Rtree : MonoBehaviour
 
     private void Step0() {
         //fill root
-        Node obj0 = new(new Vector2(1f, -3f), new Vector2(2f, 2f));
+        Node obj0 = new("obj0", new Vector2(1f, -3f), new Vector2(2f, 2f));
         AddNode(root, obj0);
-        Node obj1 = new (new Vector2(-3f, -2f), new Vector2(1f, 1f));
+        Node obj1 = new ("obj1", new Vector2(-3f, -2f), new Vector2(1f, 1f));
         AddNode(root, obj1);
-        Node obj2 = new (new Vector2(-4f, 0f), new Vector2(2f, 2f));
+        Node obj2 = new ("obj2", new Vector2(-4f, 0f), new Vector2(2f, 2f));
         AddNode(root, obj2);
-        Node obj3 = new (new Vector2(2f, 0f), new Vector2(2f, 2f));
+        Node obj3 = new ("obj3", new Vector2(2f, 0f), new Vector2(2f, 2f));
         AddNode(root, obj3);
         NextStep();
     }
 
     private void Step1() {
         //overflow root, cause patition
-        Node obj4 = new (new Vector2(-1f, 2f), new Vector2(1f, 1f));
+        Node obj4 = new ("obj4", new Vector2(-1f, 2f), new Vector2(1f, 1f));
         AddNode(root, obj4);
         NextStep();
     }
 
     private void Step2() {
         //new node is inside leaf
-        Node obj5 = new(new Vector2(-1f, -1f), new Vector2(1f, 1f));
+        Node obj5 = new("obj5", new Vector2(-1f, -1f), new Vector2(1f, 1f));
         AddNode(root, obj5);
         //new node made leaf expand
-        Node obj6 = new(new Vector2(2f, 3f), new Vector2(1f, 1f));
+        Node obj6 = new("obj6", new Vector2(2f, 3f), new Vector2(1f, 1f));
         AddNode(root, obj6);
         NextStep();
     }
 
     private void Step3() {
         //expand and cause new partition
-        Node obj7 = new(new Vector2(-3f, -4f), new Vector2(1f, 1f));
+        Node obj7 = new("obj7", new Vector2(-3f, -4f), new Vector2(1f, 1f));
         AddNode(root, obj7);
+        NextStep();
+    }
+
+    private void Step4() {
+        var region = new Rect(new Vector2(-3f, -2f), new Vector2(3f, 3f));
+        List<Node> result = new();
+        int checks = 0;
+
+        //test linear
+        Stopwatch sw = Stopwatch.StartNew();
+        sw.Stop();
+        sw.Reset();
+        sw.Start();
+        foreach (var node in allNodes) {
+            if (node.bounds.Overlaps(region)) result.Add(node);
+            checks++;
+        }
+        var linearTime = sw.Elapsed;
+        sw.Stop();
+        sw.Reset();
+
+        Debug.Log($"Linear: {linearTime.Milliseconds}ms");
+        Debug.Log($"Checks: {checks}");
+        Debug.Log("---");
+
+        queryChecks = 0;
+        sw.Start();
+        //query region
+        result = QueryRegion(root, region);
+        var rtreeTime = sw.Elapsed;
+        sw.Stop();
+        sw.Reset();
+
+        Debug.Log($"R-tree: {rtreeTime.Milliseconds}ms");
+        Debug.Log($"Checks: {queryChecks}");
+
         NextStep();
     }
 }
