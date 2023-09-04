@@ -68,6 +68,7 @@ public class Rtree : MonoBehaviour
 
         steps = new List<Action>() {
              Noop,
+             //Simulate,
              Step0,            
              Noop,
              Step1,
@@ -80,17 +81,7 @@ public class Rtree : MonoBehaviour
     }
 
     private void Update() {
-        //steps[step].Invoke();        
-
-        int iterations = 100;
-
-        for(int i = 0; i < iterations; i++) {
-            var x = Random.Range(-WORLD_SIZE + 1f, WORLD_SIZE - 5f);
-            var y = Random.Range(-WORLD_SIZE + 1f, WORLD_SIZE - 5f);
-            var w = Random.Range(1f, 4f);
-            Node newObj = new(new Vector2(x, y), new Vector2(w, w));
-            AddNode(root, newObj);
-        }
+        steps[step].Invoke();                
     }
 
     public void NextStep() {
@@ -136,52 +127,52 @@ public class Rtree : MonoBehaviour
                 Rect leafAXCase = Expand(leafA.bounds, minMaxX.minRef.bounds);
                 Rect leafBXCase = Expand(leafB.bounds, minMaxX.maxRef.bounds);
                 float totalXCaseArea = (leafAXCase.width * leafAXCase.height) + (leafBXCase.width * leafBXCase.height);
-                Debug.Log($"XCase area: {totalXCaseArea}");
+                //Debug.Log($"XCase area: {totalXCaseArea}");
 
                 //Y Case
                 Rect leafAYCase = Expand(leafA.bounds, minMaxY.minRef.bounds);
                 Rect leafBYCase = Expand(leafB.bounds, minMaxY.maxRef.bounds);
                 float totalYCaseArea = (leafAYCase.width * leafAYCase.height) + (leafBYCase.width * leafBYCase.height);
-                Debug.Log($"YCase area: {totalYCaseArea}");
+                //Debug.Log($"YCase area: {totalYCaseArea}");
 
                 //compare cases by area
                 int xScore = 0;
                 int yScore = 0;
                 if(totalXCaseArea < totalYCaseArea) {
                     xScore++;
-                    Debug.Log($"XCase Selected for area!");
+                    //Debug.Log($"XCase Selected for area!");
                 }
                 else if (totalXCaseArea > totalYCaseArea ) {
                     yScore++;
-                    Debug.Log($"YCase Selected for area!");
+                    //Debug.Log($"YCase Selected for area!");
                 } else {
-                    Debug.Log($"Area draw!");
+                    //Debug.Log($"Area draw!");
                 }
 
                 // check overlaps
                 if (!leafAXCase.Overlaps(leafBXCase)) {
                     xScore++;
-                    Debug.Log($"XCase no overlap!");
+                    //Debug.Log($"XCase no overlap!");
                 }
 
                 if (!leafAYCase.Overlaps(leafBYCase)) {
                     yScore++;
-                    Debug.Log($"YCase no overlap!");
+                    //Debug.Log($"YCase no overlap!");
                 }
 
                 bool xPriority = true;
                 bool xSelected = xPriority;
-                Debug.Log($"XScore: {xScore}");
-                Debug.Log($"YScore: {yScore}");
+                //Debug.Log($"XScore: {xScore}");
+                //Debug.Log($"YScore: {yScore}");
                 //take final decision
                 if (xScore > yScore) {
-                    Debug.Log($"XCase selected!");
+                    //Debug.Log($"XCase selected!");
                     xSelected = true;
                 } else if (yScore > xScore) {
-                    Debug.Log($"YCase selected!");
+                    //Debug.Log($"YCase selected!");
                     xSelected = false;
                 } else {
-                    Debug.Log($"Draw! (selected by priority flag)");
+                    //Debug.Log($"Draw! (selected by priority flag)");
                 }
 
                 Node minRef = xSelected ? minMaxX.minRef : minMaxY.minRef;
@@ -243,6 +234,7 @@ public class Rtree : MonoBehaviour
             foreach (var leaf in parent.leaves) {
                 if(leaf.bounds.Overlaps(node.bounds)) {
                     AddNode(leaf, node);
+                    parent.bounds = Expand(parent.bounds, leaf.bounds);
                     return;
                 }               
             }
@@ -265,6 +257,7 @@ public class Rtree : MonoBehaviour
             }
 
             AddNode(minRef, node);
+            parent.bounds = Expand(parent.bounds, minRef.bounds);
             return;
         }
     }
@@ -384,6 +377,20 @@ public class Rtree : MonoBehaviour
         leafBounds.yMax = Mathf.Max(leafBounds.yMax, nodeBounds.yMax);
 
         return leafBounds;
+    }
+
+    private void Simulate() {
+        //int iterations = 100;
+
+        //for (int i = 0; i < iterations; i++) {
+            var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
+            var y = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
+            var w = Random.Range(0.25f, 1f);
+            Node newObj = new(new Vector2(x, y), new Vector2(w, w));
+            AddNode(root, newObj);
+        //}
+
+        step = 0;
     }
 
     private void Noop() {
