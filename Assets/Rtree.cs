@@ -2,7 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using Unity.VisualScripting;
+using UnityEditor.Experimental.GraphView;
 using UnityEngine;
+using Random = UnityEngine.Random;
 
 public class Node {
     public Node(Rect bounds) {
@@ -16,13 +18,6 @@ public class Node {
     public Rect bounds;
     public List<Node> nodes = new();
     public List<Node> leaves = new();
-
-    public void Expand(Node node) {
-        bounds.xMin = Mathf.Min(bounds.xMin, node.bounds.xMin);
-        bounds.yMin = Mathf.Min(bounds.yMin, node.bounds.yMin);
-        bounds.xMax = Mathf.Max(bounds.xMax, node.bounds.xMax);
-        bounds.yMax = Mathf.Max(bounds.yMax, node.bounds.yMax);
-    }
 }
 
 public struct MinMaxData {
@@ -33,6 +28,7 @@ public struct MinMaxData {
 public class Rtree : MonoBehaviour
 {
     private const int M = 5;
+    private const int WORLD_SIZE = 30;
 
     public Node root;
     public int step = 0;
@@ -68,19 +64,33 @@ public class Rtree : MonoBehaviour
     }
 
     private void Awake() {
-        root = new Node(new Vector2(-5, -5f), new Vector2(10, 10));
+        root = new Node(new Vector2(-WORLD_SIZE / 2f, -WORLD_SIZE / 2f), new Vector2(WORLD_SIZE, WORLD_SIZE));
 
         steps = new List<Action>() {
              Noop,
              Step0,            
              Noop,
              Step1,
-             Noop
+             Noop,
+             Step2,
+             Noop,
+             Step3,
+             Noop,
          };
     }
 
     private void Update() {
-        steps[step].Invoke();        
+        //steps[step].Invoke();        
+
+        int iterations = 100;
+
+        for(int i = 0; i < iterations; i++) {
+            var x = Random.Range(-WORLD_SIZE + 1f, WORLD_SIZE - 5f);
+            var y = Random.Range(-WORLD_SIZE + 1f, WORLD_SIZE - 5f);
+            var w = Random.Range(1f, 4f);
+            Node newObj = new(new Vector2(x, y), new Vector2(w, w));
+            AddNode(root, newObj);
+        }
     }
 
     public void NextStep() {
@@ -98,8 +108,11 @@ public class Rtree : MonoBehaviour
             // parent is leaf, try to add node
             parent.nodes.Add(node);
 
+            //expand leaf to accomodate new node
+            parent.bounds = Expand(parent.bounds, node.bounds);
+
             //check capacity
-            if(parent.nodes.Count >= M) {
+            if (parent.nodes.Count >= M) {
                 //parent is full, need partititon
                 var minMaxData = GetMinMax(ref parent);
 
@@ -114,32 +127,91 @@ public class Rtree : MonoBehaviour
                 parent.nodes.Remove(minMaxData.minRef);
                 parent.nodes.Remove(minMaxData.maxRef);
 
-                //repeat for remaining 3 nodes
-                minMaxData = GetMinMax(ref parent);
+                //for the second iteration, we're going to check
+                //for area increase and overlap
+                var minMaxX = GetMinMaxX(parent);
+                var minMaxY = GetMinMaxY(parent);
+
+                //X Case
+                Rect leafAXCase = Expand(leafA.bounds, minMaxX.minRef.bounds);
+                Rect leafBXCase = Expand(leafB.bounds, minMaxX.maxRef.bounds);
+                float totalXCaseArea = (leafAXCase.width * leafAXCase.height) + (leafBXCase.width * leafBXCase.height);
+                Debug.Log($"XCase area: {totalXCaseArea}");
+
+                //Y Case
+                Rect leafAYCase = Expand(leafA.bounds, minMaxY.minRef.bounds);
+                Rect leafBYCase = Expand(leafB.bounds, minMaxY.maxRef.bounds);
+                float totalYCaseArea = (leafAYCase.width * leafAYCase.height) + (leafBYCase.width * leafBYCase.height);
+                Debug.Log($"YCase area: {totalYCaseArea}");
+
+                //compare cases by area
+                int xScore = 0;
+                int yScore = 0;
+                if(totalXCaseArea < totalYCaseArea) {
+                    xScore++;
+                    Debug.Log($"XCase Selected for area!");
+                }
+                else if (totalXCaseArea > totalYCaseArea ) {
+                    yScore++;
+                    Debug.Log($"YCase Selected for area!");
+                } else {
+                    Debug.Log($"Area draw!");
+                }
+
+                // check overlaps
+                if (!leafAXCase.Overlaps(leafBXCase)) {
+                    xScore++;
+                    Debug.Log($"XCase no overlap!");
+                }
+
+                if (!leafAYCase.Overlaps(leafBYCase)) {
+                    yScore++;
+                    Debug.Log($"YCase no overlap!");
+                }
+
+                bool xPriority = true;
+                bool xSelected = xPriority;
+                Debug.Log($"XScore: {xScore}");
+                Debug.Log($"YScore: {yScore}");
+                //take final decision
+                if (xScore > yScore) {
+                    Debug.Log($"XCase selected!");
+                    xSelected = true;
+                } else if (yScore > xScore) {
+                    Debug.Log($"YCase selected!");
+                    xSelected = false;
+                } else {
+                    Debug.Log($"Draw! (selected by priority flag)");
+                }
+
+                Node minRef = xSelected ? minMaxX.minRef : minMaxY.minRef;
+                Node maxRef = xSelected ? minMaxX.maxRef : minMaxY.maxRef;
+                Rect leafABounds = xSelected ? leafAXCase : leafAYCase;
+                Rect leafBBounds = xSelected ? leafBXCase : leafBYCase;
 
                 //add closest ones to respective leafs
-                leafA.nodes.Add(minMaxData.minRef);
+                leafA.nodes.Add(minRef);
                 //expand leaf to encompass 
-                leafA.Expand(minMaxData.minRef);
+                leafA.bounds = leafABounds;
 
                 //do same to other node
-                leafB.nodes.Add(minMaxData.maxRef);
+                leafB.nodes.Add(maxRef);
                 //expand leaf to encompass 
-                leafB.Expand(minMaxData.maxRef);
+                leafB.bounds = leafBBounds;
 
                 //remove nodes from parent
-                parent.nodes.Remove(minMaxData.minRef);
-                parent.nodes.Remove(minMaxData.maxRef);
+                parent.nodes.Remove(minRef);
+                parent.nodes.Remove(maxRef);
 
                 //for last node, check if any leaf already encompass it
                 if (leafA.bounds.Overlaps(parent.nodes[0].bounds)) {
                     leafA.nodes.Add(parent.nodes[0]);
-                    leafA.Expand(parent.nodes[0]);
+                    leafA.bounds = Expand(leafA.bounds, parent.nodes[0].bounds);
                     //remove from parent
                     parent.nodes.Clear();
                 } else if (leafB.bounds.Overlaps(parent.nodes[0].bounds)) {
                     leafB.nodes.Add(parent.nodes[0]);
-                    leafB.Expand(parent.nodes[0]);
+                    leafB.bounds = Expand(leafB.bounds, parent.nodes[0].bounds);
                     //remove from parent
                     parent.nodes.Clear();
                 } else {
@@ -147,12 +219,12 @@ public class Rtree : MonoBehaviour
                     var center = parent.nodes[0].bounds.center;
                     if (Vector2.Distance(leafA.bounds.center, center) < Vector2.Distance(leafB.bounds.center, center)) {
                         leafA.nodes.Add(parent.nodes[0]);
-                        leafA.Expand(parent.nodes[0]);
+                        leafA.bounds = Expand(leafA.bounds, parent.nodes[0].bounds);
                         //remove from parent
                         parent.nodes.Clear();
                     } else {
                         leafB.nodes.Add(parent.nodes[0]);
-                        leafB.Expand(parent.nodes[0]);
+                        leafB.bounds = Expand(leafB.bounds, parent.nodes[0].bounds);
                         //remove from parent
                         parent.nodes.Clear();
                     }
@@ -161,7 +233,7 @@ public class Rtree : MonoBehaviour
                 parent.leaves.Add(leafB);
             }
             else {
-                //parent is good, lest go back
+                //node added with no consequences
                 return;
             }
         }
@@ -234,13 +306,13 @@ public class Rtree : MonoBehaviour
         Node maxYref = null;
 
         foreach (Node node in parent.nodes) {
-            if (node.bounds.xMin < minY) {
-                minY = node.bounds.xMin;
+            if (node.bounds.yMin < minY) {
+                minY = node.bounds.yMin;
                 minYref = node;
             }
 
-            if (node.bounds.xMax > maxY) {
-                maxY = node.bounds.xMax;
+            if (node.bounds.yMax > maxY) {
+                maxY = node.bounds.yMax;
                 maxYref = node;
             }
         }
@@ -305,6 +377,15 @@ public class Rtree : MonoBehaviour
         return minMaxData;
     }
 
+    public Rect Expand(Rect leafBounds, Rect nodeBounds) {
+        leafBounds.xMin = Mathf.Min(leafBounds.xMin, nodeBounds.xMin);
+        leafBounds.yMin = Mathf.Min(leafBounds.yMin, nodeBounds.yMin);
+        leafBounds.xMax = Mathf.Max(leafBounds.xMax, nodeBounds.xMax);
+        leafBounds.yMax = Mathf.Max(leafBounds.yMax, nodeBounds.yMax);
+
+        return leafBounds;
+    }
+
     private void Noop() {
         if (Input.GetKeyDown(KeyCode.Space)) {
             NextStep();
@@ -312,6 +393,7 @@ public class Rtree : MonoBehaviour
     }
 
     private void Step0() {
+        //fill root
         Node obj0 = new(new Vector2(1f, -3f), new Vector2(2f, 2f));
         AddNode(root, obj0);
         Node obj1 = new (new Vector2(-3f, -2f), new Vector2(1f, 1f));
@@ -324,8 +406,26 @@ public class Rtree : MonoBehaviour
     }
 
     private void Step1() {
+        //overflow root, cause patition
         Node obj4 = new (new Vector2(-1f, 2f), new Vector2(1f, 1f));
         AddNode(root, obj4);
+        NextStep();
+    }
+
+    private void Step2() {
+        //new node is inside leaf
+        Node obj5 = new(new Vector2(-1f, -1f), new Vector2(1f, 1f));
+        AddNode(root, obj5);
+        //new node made leaf expand
+        Node obj6 = new(new Vector2(2f, 3f), new Vector2(1f, 1f));
+        AddNode(root, obj6);
+        NextStep();
+    }
+
+    private void Step3() {
+        //expand and cause new partition
+        Node obj7 = new(new Vector2(-3f, -4f), new Vector2(1f, 1f));
+        AddNode(root, obj7);
         NextStep();
     }
 }
