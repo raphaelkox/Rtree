@@ -1,321 +1,376 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.Linq;
 using UnityEditor.Experimental.GraphView;
 using UnityEngine;
-using Random = UnityEngine.Random;
-using Debug = UnityEngine.Debug;
 
-public class Node {
-    public string id;
-    public Node(string id, Rect bounds) {
-        this.bounds = bounds;
-        this.id = id;
+public interface IDataContainer<T> {
+    T ObjectData { get; }
+    void SetData(T data);
+}
+
+public interface IBoundsProvider {
+    Rect GetBounds();
+}
+
+public interface IRTreeNode {
+    IRTreeNode Parent { get; }
+    Rect Bounds { get; }
+    List<IRTreeNode> Children { get; }
+    List<IRTreeNode> Leaves { get; }
+    void AddLeaf(IRTreeNode leafNode);
+    void AddChild(IRTreeNode node);
+    void AddChild(IRTreeNode node, Rect preCalculatedBounds);
+    void RemoveChild(IRTreeNode node);
+    void DetachFromTree();
+    void SetParent(IRTreeNode parent);
+    void SetBounds(Rect bounds);
+    void UpdateBounds(IRTreeNode node);
+}
+
+public class Node<T> : IRTreeNode, IDataContainer<T> where T : IBoundsProvider, IEquatable<T> {
+    public T ObjectData { get; private set; }
+    public IRTreeNode Parent { get; private set; }
+    public Rect Bounds { get; private set; }
+    public List<IRTreeNode> Children { get; private set; }
+    public List<IRTreeNode> Leaves { get; private set; }
+
+    public Node(Node<T> parent, Vector2 center, Vector2 size, T objectData = default) :
+        this(parent, new Rect(center, size), objectData) {
     }
 
-    public Node(string id, Vector2 center, Vector2 size) {
-        bounds = new Rect(center, size);
-        this.id = id;
+    public Node(Node<T> parent, Rect bounds, T objectData = default) {
+        Parent = parent;
+        Bounds = bounds;
+        ObjectData = objectData;
+
+        Children = new List<IRTreeNode>();
+        Leaves = new List<IRTreeNode>();
     }
 
-    public Rect bounds;
-    public List<Node> nodes = new();
-    public List<Node> leaves = new();
+    public void AddLeaf(IRTreeNode leafNode) {
+        Leaves.Add(leafNode);
+        UpdateBounds(leafNode);
+    }
+
+    public void AddChild(IRTreeNode node) {
+        node.SetParent(this);
+        Children.Add(node);
+        UpdateBounds(node);
+    }
+
+    public void AddChild(IRTreeNode node, Rect preCalculatedBounds) {
+        node.SetParent(this);
+        Children.Add(node);
+        Bounds = preCalculatedBounds;
+    }    
+
+    public void RemoveChild(IRTreeNode node) {
+        node.SetParent(null);
+        Children.Remove(node);
+    }
+
+    public void DetachFromTree() {
+        Parent.RemoveChild(this);
+    }
+
+    public void SetParent(IRTreeNode parent) {
+        Parent = parent;
+    }
+
+    public void SetBounds(Rect bounds) {
+        Bounds = bounds;
+    }
+
+    public void UpdateBounds(IRTreeNode node) {
+        Bounds = Bounds.ExpandedToContain(node.Bounds);
+    }
+
+    public void SetData(T data) {
+        ObjectData = data;
+    }
 }
 
 public struct MinMaxData {
     public float min, max;
-    public Node minRef, maxRef;
+    public IRTreeNode minRef, maxRef;
 }
 
-public class Rtree : MonoBehaviour
-{
-    [SerializeField] private BoxCollider2D queryArea;
+public class Rtree<T> where T : IBoundsProvider, IEquatable<T> {
+    //max densisty per leaf
+    private int m = 50;
 
-    private const int M = 50;
-    private const int WORLD_SIZE = 100;
+    private float worldSize;
 
-    public Node root;
-    public int step = 0;
-    public List<Action> steps;
-    public List<Color> colors = new() { Color.white };
-    public bool debug;
+    public Node<T> Root { get; private set; }
+    private List<Color> colors = new() { Color.white };
+    private List<Node<T>> queryResultList = new();
 
-    private void OnDrawGizmos() {
-        if(!debug || root == null) return;
-
-        DrawNode(root, 0, false);
+    public Rtree(float worldSize, int density){
+        this.worldSize = worldSize;
+        this.m = density;
+        Root = new Node<T>(null, new Vector2(-worldSize / 2f, -worldSize / 2f), new Vector2(worldSize, worldSize));
     }
 
-    private void DrawNode(Node node, int colorIndex, bool isNode) {
-        colorIndex %= colors.Count;
+    public bool SelectBestCaseFromAreaAndOverlapScore(
+        bool xPriority,
+        float totalXCaseArea, 
+        float totalYCaseArea,
+        Rect leafABoundsXCase,
+        Rect leafBBoundsXCase,
+        Rect leafABoundsYCase,
+        Rect leafBBoundsYCase
+        ) {
 
-        Gizmos.color = colors[colorIndex];
-        if (isNode) {
-            Gizmos.DrawCube(node.bounds.center, node.bounds.size);
-        } else {
-            Gizmos.DrawWireCube(node.bounds.center, node.bounds.size);
+        int xScore = 0;
+        int yScore = 0;
+
+        //compare cases by area
+        if (totalXCaseArea < totalYCaseArea) xScore++;
+        else if (totalXCaseArea > totalYCaseArea) yScore++;
+
+        // check overlaps
+        if (!leafABoundsXCase.Overlaps(leafBBoundsXCase)) xScore++;
+        if (!leafABoundsYCase.Overlaps(leafBBoundsYCase))  yScore++;
+
+        bool xSelected = xPriority;
+
+        if (xScore > yScore) xSelected = true;
+        else if (yScore > xScore) xSelected = false;
+
+        return xSelected;
+    }
+
+    public void SplitLeafNode(ref IRTreeNode parent) {
+        var minMaxData = GetMinMax(ref parent);
+
+        parent.RemoveChild(minMaxData.minRef);
+        parent.RemoveChild(minMaxData.maxRef);
+
+        //create 2 leafs, to add furthest nodes apart
+        Node<T> leafA = new(parent as Node<T>, minMaxData.minRef.Bounds);
+        leafA.AddChild(minMaxData.minRef);
+
+        Node<T> leafB = new(parent as Node<T>, minMaxData.maxRef.Bounds);
+        leafB.AddChild(minMaxData.maxRef);        
+
+        int safety = 0;
+        while (parent.Children.Count > 1 && safety < 1000) {
+            safety++;
+
+            var minMaxX = GetMinMaxX(parent);
+            var minMaxY = GetMinMaxY(parent);
+
+            Rect leafAXCase = leafA.Bounds.ExpandedToContain(minMaxX.minRef.Bounds);
+            Rect leafBXCase = leafB.Bounds.ExpandedToContain(minMaxX.maxRef.Bounds);
+            float totalXCaseArea = (leafAXCase.width * leafAXCase.height) + (leafBXCase.width * leafBXCase.height);
+
+            Rect leafAYCase = leafA.Bounds.ExpandedToContain(minMaxY.minRef.Bounds);
+            Rect leafBYCase = leafB.Bounds.ExpandedToContain(minMaxY.maxRef.Bounds);
+            float totalYCaseArea = (leafAYCase.width * leafAYCase.height) + (leafBYCase.width * leafBYCase.height);
+
+            bool xSelected = SelectBestCaseFromAreaAndOverlapScore(
+                true, totalXCaseArea, totalYCaseArea, leafAXCase, leafBXCase, leafAYCase, leafBYCase);
+
+            IRTreeNode minRef = xSelected ? minMaxX.minRef : minMaxY.minRef;
+            IRTreeNode maxRef = xSelected ? minMaxX.maxRef : minMaxY.maxRef;
+            Rect leafABounds = xSelected ? leafAXCase : leafAYCase;
+            Rect leafBBounds = xSelected ? leafBXCase : leafBYCase;
+
+            parent.RemoveChild(minRef);
+            parent.RemoveChild(maxRef);
+
+            leafA.AddChild(minRef, leafABounds);
+            leafB.AddChild(maxRef, leafBBounds);            
         }
 
-        if (node.leaves.Count > 0) {
-            foreach(Node leaf in node.leaves) {
-                DrawNode(leaf, colorIndex + 1, false);
-            }
+        //deal with last node in case of odd M
+        if (parent.Children.Count > 0) {
+            IRTreeNode lastNode = parent.Children[0];
+            IRTreeNode leafNode = SelectLeafNode(lastNode.Bounds, leafA, leafB);
+
+            parent.RemoveChild(lastNode);
+            leafNode.AddChild(lastNode);
         }
-
-        foreach(Node child in node.nodes) {
-            DrawNode(child, colorIndex + 1, true);
-        }
+        parent.Leaves.Add(leafA);
+        parent.Leaves.Add(leafB);
     }
 
-    private void Awake() {
-        root = new Node("root", new Vector2(-WORLD_SIZE / 2f, -WORLD_SIZE / 2f), new Vector2(WORLD_SIZE, WORLD_SIZE));
+    public IRTreeNode SelectLeafNode(Rect nodeBounds, IRTreeNode leafA, IRTreeNode leafB) {
+        //check if the bounds already overlap any of the nodes, favoring A
+        if (leafA.Bounds.Overlaps(nodeBounds)) return leafA;
+        if (leafB.Bounds.Overlaps(nodeBounds)) return leafB;
 
-        steps = new List<Action>() {
-             Noop,
-             //Simulate,
-             SimulateInteractive,
-             /*Step0,            
-             Noop,
-             Step1,
-             Noop,
-             Step2,
-             Noop,
-             Step3,
-             Noop,
-             Step4,
-             Noop,*/
-         };
+        //get closest by distance
+        var center = nodeBounds.center;
+        float distanceToA = Vector2.Distance(leafA.Bounds.center, center);
+        float distanceToB = Vector2.Distance(leafB.Bounds.center, center);
+        if (distanceToA < distanceToB) return leafA;
+
+        return leafB;
     }
 
-    private void Update() {
-        steps[step].Invoke();                
+    public void AddObject(T obj) {
+        Node<T> newNode = new Node<T>(null, obj.GetBounds(), obj);
+
+        AddNode(Root, newNode);
     }
 
-    public void NextStep() {
-        step++;
-        if (step >= steps.Count) {
-            step = steps.Count - 1;
-        }
-    }
-
-    private List<Node> allNodes = new List<Node>();
-
-    public void AddNode(Node parent, Node node) {        
+    private void AddNode(IRTreeNode parent, IRTreeNode node) {
         //check if parent is leaf
-        if(parent.leaves.Count == 0) {
+        if (parent.Leaves.Count == 0) {
             // parent is leaf, try to add node
-            parent.nodes.Add(node);
-
-            //expand leaf to accomodate new node
-            parent.bounds = Expand(parent.bounds, node.bounds);
+            parent.AddChild(node);
 
             //check capacity
-            if (parent.nodes.Count >= M) {
-                //parent is full, need partititon
-                var minMaxData = GetMinMax(ref parent);
-
-                //create 2 leafs, to add furthest nodes apart
-                Node leafA = new($"{parent.id}_leafA", minMaxData.minRef.bounds);
-                leafA.nodes.Add(minMaxData.minRef);
-
-                Node leafB = new($"{parent.id}_leafB", minMaxData.maxRef.bounds);
-                leafB.nodes.Add(minMaxData.maxRef);
-
-                //remove nodes from parent
-                parent.nodes.Remove(minMaxData.minRef);
-                parent.nodes.Remove(minMaxData.maxRef);
-
-                int safety = 0;
-                while (parent.nodes.Count > 1 && safety < 1000) {
-                    safety++;
-                    //for the next iteration, we're going to check
-                    //for area increase and overlap
-                    var minMaxX = GetMinMaxX(parent);
-                    var minMaxY = GetMinMaxY(parent);
-
-                    //X Case
-                    Rect leafAXCase = Expand(leafA.bounds, minMaxX.minRef.bounds);
-                    Rect leafBXCase = Expand(leafB.bounds, minMaxX.maxRef.bounds);
-                    float totalXCaseArea = (leafAXCase.width * leafAXCase.height) + (leafBXCase.width * leafBXCase.height);
-                    //Debug.Log($"XCase area: {totalXCaseArea}");
-
-                    //Y Case
-                    Rect leafAYCase = Expand(leafA.bounds, minMaxY.minRef.bounds);
-                    Rect leafBYCase = Expand(leafB.bounds, minMaxY.maxRef.bounds);
-                    float totalYCaseArea = (leafAYCase.width * leafAYCase.height) + (leafBYCase.width * leafBYCase.height);
-                    //Debug.Log($"YCase area: {totalYCaseArea}");
-
-                    //compare cases by area
-                    int xScore = 0;
-                    int yScore = 0;
-                    if (totalXCaseArea < totalYCaseArea) {
-                        xScore++;
-                        //Debug.Log($"XCase Selected for area!");
-                    } else if (totalXCaseArea > totalYCaseArea) {
-                        yScore++;
-                        //Debug.Log($"YCase Selected for area!");
-                    } else {
-                        //Debug.Log($"Area draw!");
-                    }
-
-                    // check overlaps
-                    if (!leafAXCase.Overlaps(leafBXCase)) {
-                        xScore++;
-                        //Debug.Log($"XCase no overlap!");
-                    }
-
-                    if (!leafAYCase.Overlaps(leafBYCase)) {
-                        yScore++;
-                        //Debug.Log($"YCase no overlap!");
-                    }
-
-                    bool xPriority = true;
-                    bool xSelected = xPriority;
-                    //Debug.Log($"XScore: {xScore}");
-                    //Debug.Log($"YScore: {yScore}");
-                    //take final decision
-                    if (xScore > yScore) {
-                        //Debug.Log($"XCase selected!");
-                        xSelected = true;
-                    } else if (yScore > xScore) {
-                        //Debug.Log($"YCase selected!");
-                        xSelected = false;
-                    } else {
-                        //Debug.Log($"Draw! (selected by priority flag)");
-                    }
-
-                    Node minRef = xSelected ? minMaxX.minRef : minMaxY.minRef;
-                    Node maxRef = xSelected ? minMaxX.maxRef : minMaxY.maxRef;
-                    Rect leafABounds = xSelected ? leafAXCase : leafAYCase;
-                    Rect leafBBounds = xSelected ? leafBXCase : leafBYCase;
-
-                    //add closest ones to respective leafs
-                    leafA.nodes.Add(minRef);
-                    //expand leaf to encompass 
-                    leafA.bounds = leafABounds;
-
-                    //do same to other node
-                    leafB.nodes.Add(maxRef);
-                    //expand leaf to encompass 
-                    leafB.bounds = leafBBounds;
-
-                    //remove nodes from parent
-                    parent.nodes.Remove(minRef);
-                    parent.nodes.Remove(maxRef);
-                }
-
-                if (parent.nodes.Count > 0) {
-                    //for last node, check if any leaf already encompass it
-                    if (leafA.bounds.Overlaps(parent.nodes[0].bounds)) {
-                        leafA.nodes.Add(parent.nodes[0]);
-                        leafA.bounds = Expand(leafA.bounds, parent.nodes[0].bounds);
-                        //remove from parent
-                        parent.nodes.Clear();
-                    } else if (leafB.bounds.Overlaps(parent.nodes[0].bounds)) {
-                        leafB.nodes.Add(parent.nodes[0]);
-                        leafB.bounds = Expand(leafB.bounds, parent.nodes[0].bounds);
-                        //remove from parent
-                        parent.nodes.Clear();
-                    } else {
-                        //no leafs overlap, get closest by distance
-                        var center = parent.nodes[0].bounds.center;
-                        if (Vector2.Distance(leafA.bounds.center, center) < Vector2.Distance(leafB.bounds.center, center)) {
-                            leafA.nodes.Add(parent.nodes[0]);
-                            leafA.bounds = Expand(leafA.bounds, parent.nodes[0].bounds);
-                            //remove from parent
-                            parent.nodes.Clear();
-                        } else {
-                            leafB.nodes.Add(parent.nodes[0]);
-                            leafB.bounds = Expand(leafB.bounds, parent.nodes[0].bounds);
-                            //remove from parent
-                            parent.nodes.Clear();
-                        }
-                    }
-                }
-                parent.leaves.Add(leafA);
-                parent.leaves.Add(leafB);
-            }
-            else {
-                //node added with no consequences
-                return;
-            }
-        }
-        else {
-            // current node is not a leaf
-            // start by checking if we overlap any of the leaves
-            foreach (var leaf in parent.leaves) {
-                if(leaf.bounds.Overlaps(node.bounds)) {
-                    AddNode(leaf, node);
-                    parent.bounds = Expand(parent.bounds, leaf.bounds);
-                    return;
-                }               
-            }
-
-            // if no leaf is overlaping, choose by distance
-            float minDist = float.PositiveInfinity;
-            float d;
-            Node minRef = null;
-            foreach (var leaf in parent.leaves) {
-                d = Vector2.Distance(leaf.bounds.center, node.bounds.center);
-                if (d < minDist) {
-                    minDist = d;
-                    minRef = leaf;
-                }
-            }
-
-            if(minRef == null) {
-                Debug.Log("WHAT T F HAPPENED?");
-                return;
-            }
-
-            AddNode(minRef, node);
-            parent.bounds = Expand(parent.bounds, minRef.bounds);
+            if (parent.Children.Count >= m) SplitLeafNode(ref parent);
             return;
         }
+
+        // current node is not a leaf
+        // start by checking if we overlap any of the leaves
+        foreach (var leaf in parent.Leaves) {
+            if (leaf.Bounds.Overlaps(node.Bounds)) {
+                AddNode(leaf, node);
+                parent.UpdateBounds(leaf);
+                return;
+            }
+        }
+
+        // if no leaf is overlaping, choose by distance
+        float minDist = float.PositiveInfinity;
+        float d;
+        IRTreeNode minRef = null;
+        foreach (var leaf in parent.Leaves) {
+            d = Vector2.Distance(leaf.Bounds.center, node.Bounds.center);
+            if (d < minDist) {
+                minDist = d;
+                minRef = leaf;
+            }
+        }
+
+        AddNode(minRef, node);
+        parent.UpdateBounds(minRef);
     }
 
-    private int queryChecks = 0;
-    public List<Node> QueryRegion(Node current, Rect region) {
-        List<Node> result = new();
+    public void RemoveObject(T obj) {
+        queryResultList.Clear();
 
-        if(current.leaves.Count > 0) {
+        QueryRegion(Root, obj.GetBounds(), queryResultList);
+
+        foreach (var node in queryResultList) {
+            if (node.ObjectData.Equals(obj)) {
+                node.DetachFromTree();
+                return;
+            }
+        }
+    }
+
+    public void QueryObjects(Rect region, List<T> result) {
+        QueryRegion(Root, region, result);
+    }
+
+    public void QueryObjectsNonRecursive(Rect region, List<T> resultList) {
+        resultList.Clear();
+        IRTreeNode pointer;
+        Stack<IRTreeNode> stack = new Stack<IRTreeNode>();
+
+        stack.Push(Root);
+
+        while (stack.TryPop(out pointer)) {
+            if (region.Overlaps(pointer.Bounds)) {
+                if (pointer.Leaves.Count > 0) {
+                    foreach (IRTreeNode leaf in pointer.Leaves) {
+                        stack.Push(leaf);
+                    }
+                } else {
+                    foreach (IRTreeNode node in pointer.Children) {
+                        if (region.Overlaps(node.Bounds)) resultList.Add((node as Node<T>).ObjectData);
+                    }
+                }
+            }
+        }
+    }
+
+    public void QueryRegionNonRecursive(Rect region, List<Node<T>> resultList) {
+        resultList.Clear();
+        IRTreeNode pointer;
+        Stack<IRTreeNode> stack = new Stack<IRTreeNode>();
+
+        stack.Push(Root);
+
+        while (stack.TryPop(out pointer)) {
+            if (region.Overlaps(pointer.Bounds)) {
+                if (pointer.Leaves.Count > 0) {
+                    foreach (IRTreeNode leaf in pointer.Leaves) {
+                        stack.Push(leaf);
+                    }
+                } else {
+                    foreach (IRTreeNode node in pointer.Children) {
+                        if (region.Overlaps(node.Bounds)) resultList.Add(node as Node<T>);
+                    }
+                }
+            }
+        }
+    }
+
+    private void QueryRegion(IRTreeNode current, Rect region, List<T> resultList) {
+        resultList.Clear();
+
+        if (current.Leaves.Count > 0) {
             //not leaf node
-            foreach (var leaf in current.leaves) {
-                queryChecks++;
-                if (leaf.bounds.Overlaps(region)) {
-                    result.AddRange(QueryRegion(leaf, region));
+            foreach (var leaf in current.Leaves) {
+                if (leaf.Bounds.Overlaps(region)) {
+                    QueryRegion(leaf, region, resultList);
                 }
             }
         }
 
-        foreach (var child in current.nodes) {
-            queryChecks++;
-            if (child.bounds.Overlaps(region)) {
-                result.Add(child);
+        foreach (var child in current.Children) {
+            if (child.Bounds.Overlaps(region)) {
+                resultList.Add((child as Node<T>).ObjectData);
+            }
+        }
+    }
+
+    
+
+    private void QueryRegion(IRTreeNode current, Rect region, List<Node<T>> resultList) {
+        resultList.Clear();
+
+        if(current.Leaves.Count > 0) {
+            //not leaf node
+            foreach (var leaf in current.Leaves) {
+                if (leaf.Bounds.Overlaps(region)) {
+                    QueryRegion(leaf, region, resultList);
+                }
             }
         }
 
-        return result;
+        foreach (var child in current.Children) {
+            if (child.Bounds.Overlaps(region)) {
+                resultList.Add(child as Node<T>);
+            }
+        }
     }
 
-    public MinMaxData GetMinMaxX(Node parent) {
+    public MinMaxData GetMinMaxX(IRTreeNode parent) {
         MinMaxData minMaxData = new();
         //set def values
         float minX = float.PositiveInfinity;
         float maxX = float.NegativeInfinity;
-        Node minXref = null;
-        Node maxXref = null;
+        IRTreeNode minXref = null;
+        IRTreeNode maxXref = null;
 
-        foreach (Node node in parent.nodes) {
-            if (node.bounds.xMin < minX) {
-                minX = node.bounds.xMin;
+        foreach (IRTreeNode node in parent.Children) {
+            if (node.Bounds.xMin < minX) {
+                minX = node.Bounds.xMin;
                 minXref = node;
             }
 
-            if (node.bounds.xMax > maxX) {
-                maxX = node.bounds.xMax;
+            if (node.Bounds.xMax > maxX) {
+                maxX = node.Bounds.xMax;
                 maxXref = node;
             }
         }
@@ -328,22 +383,22 @@ public class Rtree : MonoBehaviour
         return minMaxData;
     }
 
-    public MinMaxData GetMinMaxY(Node parent) {
+    public MinMaxData GetMinMaxY(IRTreeNode parent) {
         MinMaxData minMaxData = new();
         //set def values
         float minY = float.PositiveInfinity;
         float maxY = float.NegativeInfinity;
-        Node minYref = null;
-        Node maxYref = null;
+        IRTreeNode minYref = null;
+        IRTreeNode maxYref = null;
 
-        foreach (Node node in parent.nodes) {
-            if (node.bounds.yMin < minY) {
-                minY = node.bounds.yMin;
+        foreach (IRTreeNode node in parent.Children) {
+            if (node.Bounds.yMin < minY) {
+                minY = node.Bounds.yMin;
                 minYref = node;
             }
 
-            if (node.bounds.yMax > maxY) {
-                maxY = node.bounds.yMax;
+            if (node.Bounds.yMax > maxY) {
+                maxY = node.Bounds.yMax;
                 maxYref = node;
             }
         }
@@ -356,209 +411,20 @@ public class Rtree : MonoBehaviour
         return minMaxData;
     }
 
-    public MinMaxData GetMinMax(ref Node parent) {
-        MinMaxData minMaxData = new();
-        //set def values
-        float minX = float.PositiveInfinity;
-        float minY = float.PositiveInfinity;
-        float maxX = float.NegativeInfinity;
-        float maxY = float.NegativeInfinity;
-        Node minXref = null;
-        Node maxXref = null;
-        Node minYref = null;
-        Node maxYref = null;
-
+    public MinMaxData GetMinMax(ref IRTreeNode parent) {
         //iterate saving min/max x/y with ref to owners
-        foreach(Node node in parent.nodes) { 
-            if(node.bounds.xMin < minX) {
-                minX = node.bounds.xMin;
-                minXref = node;
-            }
+        var minMaxX = GetMinMaxX(parent);
+        var minMaxY = GetMinMaxY(parent);
 
-            if (node.bounds.xMax > maxX) {
-                maxX = node.bounds.xMax;
-                maxXref = node;
-            }
+        float xRange = minMaxX.max - minMaxX.min;
+        float yRange = minMaxY.max - minMaxY.min;
 
-            if (node.bounds.yMin < minY) {
-                minY = node.bounds.yMin;
-                minYref = node;
-            }
-
-            if (node.bounds.yMax > maxY) {
-                maxY = node.bounds.yMax;
-                maxYref = node;
-            }
-        }
-
-        if (maxX - minX > maxY - minY) {
-            minMaxData.min = minX;
-            minMaxData.max = maxX;
-            minMaxData.minRef = minXref;
-            minMaxData.maxRef = maxXref;
+        if (xRange > yRange) {
+            return minMaxX;
         }
         else
         {
-            minMaxData.min = minY;
-            minMaxData.max = maxY;
-            minMaxData.minRef = minYref;
-            minMaxData.maxRef = maxYref;
+            return minMaxY;
         }
-
-        return minMaxData;
-    }
-
-    public Rect Expand(Rect leafBounds, Rect nodeBounds) {
-        leafBounds.xMin = Mathf.Min(leafBounds.xMin, nodeBounds.xMin);
-        leafBounds.yMin = Mathf.Min(leafBounds.yMin, nodeBounds.yMin);
-        leafBounds.xMax = Mathf.Max(leafBounds.xMax, nodeBounds.xMax);
-        leafBounds.yMax = Mathf.Max(leafBounds.yMax, nodeBounds.yMax);
-
-        return leafBounds;
-    }
-
-    private void SimulateInteractive() {
-        int iterations = 10;
-
-        for (int i = 0; i < iterations; i++) {
-            var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
-            var y = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
-            var w = Random.Range(0.25f, 1f);
-            Node newObj = new("", new Vector2(x, y), new Vector2(w, w));
-            AddNode(root, newObj);
-        }
-
-        step = 0;
-    }
-
-    private void QueryInteractive() {
-        var region = new Rect(queryArea.bounds.min.x, queryArea.bounds.min.y, queryArea.bounds.size.x, queryArea.bounds.size.y);
-        List<Node> result = new();
-
-        //test linear
-        Stopwatch sw = Stopwatch.StartNew();
-        sw.Stop();
-        sw.Reset();
-        /*sw.Start();
-        foreach (var node in allNodes) {
-            if (node.bounds.Overlaps(region)) result.Add(node);
-            checks++;
-        }
-        var linearTime = sw.Elapsed;
-        sw.Stop();
-        sw.Reset();
-
-        Debug.Log($"Linear: {linearTime.Milliseconds}ms");
-        Debug.Log($"Checks: {checks}");
-        Debug.Log("---");*/
-
-        queryChecks = 0;
-        sw.Start();
-        //query region
-        result = QueryRegion(root, region);
-        var rtreeTime = sw.Elapsed;
-        sw.Stop();
-        sw.Reset();
-
-        Debug.Log($"R-tree: {rtreeTime.Milliseconds}ms");
-        Debug.Log($"Checks: {queryChecks}");
-    }
-
-    private void Simulate() {
-        int iterations = 10000;
-
-        for (int i = 0; i < iterations; i++) {
-            var x = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
-            var y = Random.Range(-WORLD_SIZE / 2f + 1f, WORLD_SIZE / 2f - 5f);
-            var w = Random.Range(0.25f, 1f);
-            Node newObj = new("", new Vector2(x, y), new Vector2(w, w));
-            AddNode(root, newObj);
-            allNodes.Add(newObj);
-        }
-
-        NextStep();
-    }
-
-    private void Noop() {
-        if (Input.GetKeyDown(KeyCode.Space) || Input.GetMouseButtonDown(0)) {
-            NextStep();
-        }
-
-        if (Input.GetMouseButtonDown(1)) {
-            QueryInteractive();
-        }
-    }
-
-    private void Step0() {
-        //fill root
-        Node obj0 = new("obj0", new Vector2(1f, -3f), new Vector2(2f, 2f));
-        AddNode(root, obj0);
-        Node obj1 = new ("obj1", new Vector2(-3f, -2f), new Vector2(1f, 1f));
-        AddNode(root, obj1);
-        Node obj2 = new ("obj2", new Vector2(-4f, 0f), new Vector2(2f, 2f));
-        AddNode(root, obj2);
-        Node obj3 = new ("obj3", new Vector2(2f, 0f), new Vector2(2f, 2f));
-        AddNode(root, obj3);
-        NextStep();
-    }
-
-    private void Step1() {
-        //overflow root, cause patition
-        Node obj4 = new ("obj4", new Vector2(-1f, 2f), new Vector2(1f, 1f));
-        AddNode(root, obj4);
-        NextStep();
-    }
-
-    private void Step2() {
-        //new node is inside leaf
-        Node obj5 = new("obj5", new Vector2(-1f, -1f), new Vector2(1f, 1f));
-        AddNode(root, obj5);
-        //new node made leaf expand
-        Node obj6 = new("obj6", new Vector2(2f, 3f), new Vector2(1f, 1f));
-        AddNode(root, obj6);
-        NextStep();
-    }
-
-    private void Step3() {
-        //expand and cause new partition
-        Node obj7 = new("obj7", new Vector2(-3f, -4f), new Vector2(1f, 1f));
-        AddNode(root, obj7);
-        NextStep();
-    }
-
-    private void Step4() {
-        var region = new Rect(new Vector2(-3f, -2f), new Vector2(3f, 3f));
-        List<Node> result = new();
-        int checks = 0;
-
-        //test linear
-        Stopwatch sw = Stopwatch.StartNew();
-        sw.Stop();
-        sw.Reset();
-        /*sw.Start();
-        foreach (var node in allNodes) {
-            if (node.bounds.Overlaps(region)) result.Add(node);
-            checks++;
-        }
-        var linearTime = sw.Elapsed;
-        sw.Stop();
-        sw.Reset();
-
-        Debug.Log($"Linear: {linearTime.Milliseconds}ms");
-        Debug.Log($"Checks: {checks}");
-        Debug.Log("---");*/
-
-        queryChecks = 0;
-        sw.Start();
-        //query region
-        result = QueryRegion(root, region);
-        var rtreeTime = sw.Elapsed;
-        sw.Stop();
-        sw.Reset();
-
-        Debug.Log($"R-tree: {rtreeTime.Milliseconds}ms");
-        Debug.Log($"Checks: {queryChecks}");
-
-        NextStep();
-    }
+    }    
 }
